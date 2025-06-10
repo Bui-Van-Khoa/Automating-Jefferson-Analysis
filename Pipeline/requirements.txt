@@ -1,0 +1,6 @@
+torch torchaudio -f https://download.pytorch.org/whl/cpu/torch_stable.htmldeepfilternet
+deepfilternet
+pyannote.audio
+opensmile
+transformers
+tqdm
