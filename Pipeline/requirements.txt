@@ -1,3 +1,6 @@
+numpy
+pandas
+scikit-learn
 torch torchaudio -f https://download.pytorch.org/whl/cpu/torch_stable.html
 deepfilternet
 pyannote.audio

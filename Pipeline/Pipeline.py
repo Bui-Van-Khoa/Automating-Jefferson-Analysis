@@ -1,6 +1,3 @@
-from install_requirements import install_requirements
-
-install_requirements()
 
 import os
 import subprocess
@@ -8,17 +5,21 @@ from transformers import pipeline
 from pyannote.audio import Pipeline as DiarizationPipeline
 import torchaudio
 import opensmile
+import numpy as np
+import pandas as pd
+from sklearn.linear_model import LinearRegression
 from tqdm import tqdm
 import re
 
 
 class Jefferson_Transcription:
-    def __init__(self, wav_path, num_speakers=2, speaker_names=["A","B"], noise_reduction=False, hf_token=None):
+    def __init__(self, wav_path, pitch_csv, num_speakers=2, speaker_names=["A","B"], noise_reduction=False, hf_token=None):
         assert num_speakers == len(speaker_names)
         self.wav_path = wav_path
         self.num_speakers = num_speakers
         self.speaker_names = speaker_names
         self.noise_reduction = noise_reduction
+        self.pitch_csv = pitch_csv
         self.hf_token = hf_token
 
         # Prepare filtered audio path if needed
@@ -75,6 +76,7 @@ class Jefferson_Transcription:
         result = self.asr_pipeline_words(self.wav_path)
         return result["chunks"]
 
+    # Loudness annotation function
     def annotate_loudness(self):
         
         print("Extracting loudness...")
@@ -87,18 +89,18 @@ class Jefferson_Transcription:
 
         loudness = smile.process_file(self.wav_path)["Loudness_sma3"]
 
-        # Step 2: Overall statistics
-        smile_func = opensmile.Smile(
-            feature_set=opensmile.FeatureSet.eGeMAPSv02,
-            feature_level=opensmile.FeatureLevel.Functionals,
-        )
+        # Step 2: Compute overall loudness statistics (mean and std)
 
-        func_features = smile_func.process_file(self.wav_path)
-        avg_loudness = func_features['loudness_sma3_amean'].iloc[0]
-        std_loudness = func_features['loudness_sma3_stddevNorm'].iloc[0]
+        # Get all loudness values
 
-        # Calculate the threshold: mean + 2*std
-        loudness_threshold = avg_loudness + 2 * std_loudness
+        all_loudness_values = loudness.values
+
+        # Calculate mean and standard deviation
+        loudness_mean = np.mean(all_loudness_values)
+        loudness_std = np.std(all_loudness_values)
+
+        # Calculate threshold (mean + 2*std)
+        loudness_threshold = loudness_mean + 2 * loudness_std
 
         # Step 3: Get per-word transcription
         word_chunks = self.transcribe_words() 
@@ -125,7 +127,66 @@ class Jefferson_Transcription:
 
         self.annotated_word_chunks = annotated_chunks  
 
+    # Pitch annotation function
+    def annotate_pitch(self):
+
+        print("Extracting pitch...")
+
+        # step 1:Calculate pitch
+        #self.pitch_csv = self.wav_path.replace('.wav', '_pitch.csv')
+
+        #config_path=r'./config/prosody/prosodyShs.conf'
+
+        #command = [
+            #r'./bin/SMILExtract',
+            #'-C', config_path,
+            #'-I', self.wav_path,
+            #'-O', self.pitch_csv
+        #]
+
+        #subprocess.run(command, check=True)
+        #print(f"Pitch data saved to: {self.pitch_csv}")
+
+        # Step 2: Load pitch data and filter voiced frames
+        df = pd.read_csv(self.pitch_csv, sep=';')
+        df = df[df['F0final_sma'] > 0]
+
+        # Step 3: Define function to compute pitch slope
+        def compute_pitch_slope(start, end):
+            segment = df[(df['frameTime'] >= start) & (df['frameTime'] <= end)]
+            X = segment['frameTime'].values.reshape(-1, 1)
+            y = segment['F0final_sma'].values
+            model = LinearRegression().fit(X, y)
+            return model.coef_[0]
+        
+
+        # Step 4:  compute pitch slope for each word chunk
+        slopes = []
+
+        for chunk in self.annotated_word_chunks:
+            start, end, word = chunk["timestamp"][0], chunk["timestamp"][1], chunk["text"]
+            slope = compute_pitch_slope(start, end)
+            chunk["pitch_slope"] = slope
+            slopes.append(abs(slope))
+            
+        # Step 5: Calculate slope threshold
+        slope_threshold = np.mean(slopes) + 2 * np.std(slopes)
+
+        for chunk in self.annotated_word_chunks:
+            slope = chunk["pitch_slope"]
+            if abs(slope) > slope_threshold:
+                pitch = "Up"
+            elif abs(slope) < slope_threshold:
+                pitch = "Down"
+
+            chunk["pitch"] = pitch
+                
+
     def generate_full_annotation(self):
+
+        self.annotate_loudness()
+        self.annotate_pitch()
+
         # 1. Perform speaker diarization
         diarized_segments = self.diarize()
         if not hasattr(self, 'annotated_word_chunks'):
@@ -182,6 +243,7 @@ class Jefferson_Transcription:
                     'text': word['text'],
                     'timestamp': word['timestamp'],
                     'emphasized': word['emphasized'],
+                    'pitch': word['pitch'],
                     'original_index': word_idx  # Track original position
                 })
 
@@ -226,6 +288,12 @@ class Jefferson_Transcription:
             
             # Add the word (with emphasis if needed)
             text = word['text'].upper() if word['emphasized'] else word['text'].lower()
+            # Add pitch annotaion if needed
+            if word['pitch'] == "Up":
+                text += " (↑)"
+            #elif word['pitch'] == "Down":
+            #    text += " (↓)"
+
             current_line.append(text)
             
             last_end_time = word_end
